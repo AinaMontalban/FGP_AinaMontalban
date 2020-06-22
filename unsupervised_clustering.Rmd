@@ -1,0 +1,173 @@
+---
+title: "Unsupervised_Clustering"
+author: "Aina Montalban"
+date: "6/16/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Directories
+
+
+```{r cars}
+## Load packages
+library(limma)
+library(minfi)
+library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+library(IlluminaHumanMethylationEPICmanifest)
+library(RColorBrewer)
+library(pheatmap)
+library(Gviz)
+library(stringr)
+library(gplots)
+require(factoextra)
+```
+
+## Directories
+
+
+```{r pressure, echo=FALSE}
+## Define directories
+stem_path <- "/mnt/ElRaid/amontalban/PROJECTS/2020_AMONTALBAN_PDX_Livio" 
+stem_path_idats <- "/mnt/ElRaid/amontalban/PROJECTS/methylation/tmp" # dori
+# Raw data folder, with the sample sheet and the idat files into subfolders.
+IDAT_DIR <- file.path(stem_path, "tmp")
+# Where results will be written. It should exists.
+RESULTS_DIR <- file.path(
+  stem_path, 
+  "aina/results")
+# Path where project data (as samplesheet.csv) is stored.
+DATA_DIR <- file.path(
+  stem_path, 
+  "data")
+```
+
+
+```{r}
+setwd(RESULTS_DIR)
+## Obtain annotation
+annot <- getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+load("meth.RData")
+```
+
+```{r}
+# read target file
+targets <- read.csv(file.path(DATA_DIR, "sample_sheet_PDX.csv"), skip = 7)
+targets
+#targets <- targets[-which(targets$Sample_Name %in% same_ind),]
+dim(targets)
+
+same_ind <- c( "CRC0356LMX","CRC0307LMX" ,"CRC0161LMX" ,"CRC0358LMX" ,"CRC0262LMX", "CRC0477LMX" ,"CRC0081LMX", "CRC0029LMX", "CRC0080LMX",
+               "CRC0144LMX", "CRC0306LMX")
+targets <- targets[targets$Sample_Group != "",]
+targets <- targets[!(targets$genealogy..LMX..Xenograft.from.liver.mets. %in% same_ind), ]
+dim(targets)
+mVals <- mVals[ ,as.character(targets$genealogy..LMX..Xenograft.from.liver.mets.)]
+dim(mVals)
+bVals <- bVals[, as.character(targets$genealogy..LMX..Xenograft.from.liver.mets.)]
+dim(bVals)
+```
+
+
+```{r}
+# calculate the variance of bVals
+var_bVals <- apply(bVals, 1, var)
+head(var_bVals)
+var_bVals <- var_bVals[order(var_bVals, decreasing=T)] # decreasing order
+head(var_bVals)
+
+cutoff <- mean(var_bVals) # threshold 
+probes_to_keep <- which(ifelse(var_bVals >= cutoff, TRUE, FALSE))
+keep <- probes_to_keep[1:20000]
+head(probes_to_keep)
+
+# Select in the matrices
+bVals_var <- bVals[keep, ]
+mVals_var <- mVals[keep, ]
+```
+
+# Kmeans clustering
+
+```{r}
+# M-values
+input <- t(bVals_var[1:10000,])
+dim(input)
+
+# Beta values
+# k-means clustering 2 groups
+set.seed(123)
+k2 <- kmeans(input, centers = 2, nstart = 200)
+
+targets$cluster2 <- unname(k2$cluster)
+
+
+pdf(file = file.path(RESULTS_DIR, "kmeans_silhoutte.pdf"))
+set.seed(123)
+fviz_nbclust(input, kmeans, method = "silhouette")
+dev.off()
+```
+
+
+## Hierarchical clustering
+
+```{r}
+res2 <- hcut(input, k = 2, stand = TRUE)
+
+pdf(file = file.path(RESULTS_DIR, "hc_2.pdf"))
+fviz_dend(res2, rect = TRUE, show_labels = F)
+dev.off()
+```
+
+
+
+## Distribution of clinical variables in the clusters
+
+```{r}
+pdf(file = file.path(RESULTS_DIR, "barPlot_RES-vs-NRES_2clusters.pdf"))
+ggplot(data=targets, aes(x=as.factor(cluster2), fill=Sample_Group)) + geom_bar(position = "dodge", width = 0.7) + theme_classic() +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 120)) + 
+  labs(x="", y="Number of patient-derived xenografts") + 
+  scale_x_discrete(labels=c("1" = "Cluster 1", "2" = "Cluster 2")) + scale_fill_brewer(palette = "Paired", name="")  +
+  geom_text(stat='count', position = position_dodge(width = 0.7),  size=2.8,  vjust=-0.5,
+            aes(label=paste(round(..count../tapply(..count.., ..x.., sum)[..x..], 4)*100, "%", sep="")))
+dev.off()
+
+
+pdf(file = file.path(RESULTS_DIR, "barPlot_predSex_2clusters.pdf"))
+ggplot(data=targets, aes(x=as.factor(cluster2), fill=as.factor(predictedSex))) + geom_bar(position = "dodge", width = 0.7) + theme_classic() +
+  scale_y_continuous(expand = c(0,0), limits = c(0, 120)) + 
+  labs(x="", y="Number of patient-derived xenografts") + 
+  scale_x_discrete(labels=c("1" = "Cluster 1", "2" = "Cluster 2")) + 
+  scale_fill_brewer(palette = "Paired", name="") +
+  geom_text(stat='count', position = position_dodge(width = 0.7),  size=2.8,  vjust=-0.5,
+            aes(label=paste(round(..count../tapply(..count.., ..x.., sum)[..x..], 4)*100, "%", sep="")))
+dev.off()
+```
+
+## Heatmap 
+```{r}
+
+library(pheatmap)
+my_col <- data.frame(as.factor(targets$cluster2), 
+                     targets$Sample_Group, row.names = targets$genealogy..LMX..Xenograft.from.liver.mets.)
+colnames(my_col) <- c("Clusters", "Response")
+
+png(file = file.path(RESULTS_DIR, "heatmap_kmeans.png"))
+pheatmap(bVals_var[1:10000,], col=greenred(75), treeheight_row = 0, show_colnames = F, show_rownames = F, annotation_col = my_col)
+dev.off()
+```
+
+```{r}
+diff_DMPs <- read.csv(file = file.path(RESULTS_DIR, "DMPs-diff.csv"))
+my_col <- data.frame(as.factor(targets$cluster2), 
+                     targets$Sample_Group, row.names = targets$genealogy..LMX..Xenograft.from.liver.mets.)
+colnames(my_col) <- c("Clusters", "Response")
+
+png(file = file.path(RESULTS_DIR, "heatmap_cluster_sigDMP.png"))
+pheatmap(bVals[sig_DMPs$Name[1:1000],], col=greenred(75), show_colnames = F, show_rownames = F, annotation_col = my_col, treeheight_row = 0)
+dev.off()
+```
+

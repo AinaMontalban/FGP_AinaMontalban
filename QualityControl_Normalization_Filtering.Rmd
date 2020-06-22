@@ -1,0 +1,617 @@
+---
+title: "Quality Control and Preprocessing"
+author: "Aina Montalban"
+date: "5/09/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This reports aims to perform Quality Control (QC) of DNA methylation data. After the approval of the quality control check, we perform data normalization and filtering of samples and probes. The main steps we will follow are:
+
+1. Quality control
+  - Genotyping SNPs
+  - Detection P-value
+  - Check gender
+
+2. Normalization
+
+3. Filtering
+  - Remove failed CpGs
+  - Remove SNPs
+  - Remove CpGs in the sex chromosomes
+  - Remove cross reactive probes
+
+The main purpose of these steps is to prepare data for downstream analysis (i.e. differential methylation).
+
+Before the mentioned steps, we must load the necessary packages, define the working directories, define global variables and load the data.
+
+## Load packages
+
+```{r packages, message=FALSE, warning=FALSE}
+library(limma)
+library(minfi)
+library(IlluminaHumanMethylationEPICanno.ilm10b2.hg19)
+library(IlluminaHumanMethylationEPICmanifest)
+library(RColorBrewer)
+library(Rtsne)
+library(missMethyl)
+library(matrixStats)
+library(Gviz)
+library(stringr)
+library(gplots)
+library(ggplot2)
+library(dplyr)
+library(ggfortify)
+library(gplots)
+library(knitr)
+library(tidyr)
+```
+# 1. Data Preparation
+
+## 1.1 Define directories
+
+First, we must set the working directories:
+- **STEM_PATH**: folder where all the code and data is stored.
+- **IDAT_DIR**: folder where the IDAT files are stored.
+- **DATA_DIR**: folder where it is stored the samplesheet.
+- **POLYMORPHICEPIC**: csv file with probes to remove.
+
+In addition, we can define the name of the samplesheet file.
+
+
+```{r}
+stem_path <- "/mnt/ElRaid/amontalban/PROJECTS/2020_AMONTALBAN_PDX_Livio" 
+
+IDAT_DIR <- file.path(stem_path, "tmp")
+
+RESULTS_DIR <- file.path(
+  stem_path, 
+  "aina/results")
+
+DATA_DIR <- file.path(
+  stem_path, 
+  "data")
+
+SAMPLESHEET <- "sample_sheet_PDX_AM.csv"
+
+POLYMORPHIC450k <- file.path(
+  stem_path, 
+  "illumina450k_filtering-master/48639-non-specific-probes-Illumina450k.csv")
+
+POLYMORPHICEPIC <- file.path(
+  stem_path,
+  "illumina450k_filtering-master/EPIC/13059_2016_1066_MOESM1_ESM.csv")
+
+```
+
+
+## Define variables
+
+```{r}
+class_label <- "Sample_Group"
+
+# Normalization method
+norm_method <- "Noob"
+
+# Remove poor quality samples based on mean detection pval.
+sample_mean_detP_max <- 0.05
+
+# Remove poor quality samples based on proportion of failed probes.
+max_failed_probes <- 0.05
+
+# Decide whether to remove probes failed in any sample or to mark them as NAs
+remove_or_NA_probes <- "remove"
+#remove_or_NA_probes <- "NA"
+
+# Threshold to consider failed probe.
+probe_detP_max <- 0.01
+
+# If your data includes males and females, remove probes on the sex chromosomes
+remove_sex_chr <- TRUE
+
+# Remove probes with SNPs at CpG site or at a single nucleotide extension.
+remove_SNP_probes <- TRUE
+
+# Exclude cross reactive probes 
+remove_cross_reactive <- TRUE
+
+# Perform a variance filtering to filter out bVals under average variance.
+perform_var_filtering <- FALSE
+```
+
+```{r include=FALSE}
+detect_array <- function(x) {
+  if (x == "IlluminaHumanMethylation450k") {
+    return("450k")
+  } else if (x == "IlluminaHumanMethylationEPIC") {
+    return("EPIC")
+  } else {
+    return("Unknown")
+  }
+}
+
+
+dropLociWithSnps_custom <- function(a_matrix, 
+                                    snpAnno, 
+                                    snps = c("CpG", "SBE"), 
+                                    maf = 0) {
+  res <- a_matrix
+  to_remove <- character(0)
+  # Drop "Probe" SNPs
+  if ("Probe" %in% snps) {
+    to_remove <- c(to_remove, 
+                   rownames(snpAnno)[!(is.na(snpAnno$Probe_rs)) & 
+                                       snpAnno$Probe_maf > maf])
+  }
+  
+  # Drop "CpG" SNPs
+  if ("CpG" %in% snps) {
+    to_remove <- c(to_remove, 
+                   rownames(snpAnno)[!(is.na(snpAnno$CpG_rs)) & 
+                                       snpAnno$CpG_maf > maf])
+  }
+  
+  # Drop "SBE" SNPs
+  if ("SBE" %in% snps) {
+    to_remove <- c(to_remove, 
+                   rownames(snpAnno)[!(is.na(snpAnno$SBE_rs)) & 
+                                       snpAnno$SBE_maf > maf])
+  }
+  to_keep <- !(rownames(res) %in% to_remove)
+  res <- res[to_keep,]
+  return(res)
+}
+```
+
+## 1.3 Load data
+Once we have defined the variables for the quality control and the preprocessing, we must load the data. There are two components:
+1. The samplesheet, where the clinical data is stored
+2. The RAW IDAT files, where the methylatio values are stored
+
+In order to load them, we use two minfi functions: read.metharray.sheet and read.methyarray.exp.
+
+### 1.3.1 Targets (samplesheet.csv)
+```{r}
+targets <- read.metharray.sheet(DATA_DIR, pattern=SAMPLESHEET)
+knitr::kable(head(targets[1:5, 1:5]))
+```
+
+To import prperly the IDAT files we must specify their location in the Basename variable of the samplesheet.
+
+```{r}
+targets$Basename <- file.path(IDAT_DIR, paste(targets$Slide, targets$Array, sep = "_"))
+
+# Enforce Sample_Name as character.
+targets$Sample_Name <- as.character(targets$Sample_Name)
+
+# Remove samples without responder info.
+targets <- targets[targets$Sample_Group != "", ]
+print(paste("Sample sheet rows (samples) after removing samples w/o info:", 
+            nrow(targets)))
+```
+
+
+
+## 1.3.2 Raw data (IDAT files)
+
+When we read the IDAT files, the _minfi_ function will create a RGChannelSet object.
+
+```{r}
+# Read in the raw data from the IDAT files.
+rgSet <- read.metharray.exp(targets=targets, force = TRUE)
+print(rgSet)
+```
+
+From the RGChannelSet object, we can see that the methylation matrix has 1,051,539 rows (probes) and 229 columns (samples). Moreover, in the object it is stored the row and columns names, the clinical data and finally, it is indicated the annotation array. In our case, it is the EPIC Illumina methylation array. 
+
+The code below is used to detect automically the Illumina methylation array platform from RGChannelSet.
+
+```{r}
+array_platform <- detect_array(rgSet@annotation[1])
+# get the annotation data and probes to exclude.
+if (array_platform == "450k") {
+  annot <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+  probes_to_exclude <- POLYMORPHIC450k
+} else if (array_platform == "EPIC") {
+  annot <- getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b2.hg19)
+  
+  probes_to_exclude <- POLYMORPHICEPIC
+} else {
+  stop("[ERROR] Methylation array platform not detected.")
+}
+```
+
+# 2. Quality control
+
+The main function of QC is to detect poor quality samples, probes or unwanted issues in our data. As we said, it consists in checking genotypes, detection P-value, check probes and check sex. The last control will be performed after the normalization step.
+
+## 2.1 Genotyping SNPs
+In the EPIC array, there are 59 genotyping probes to detect repeated samples or sample mixups.
+
+```{r}
+snps <- getSnpBeta(rgSet)
+colnames(snps) <- targets$Sample_Name
+my_palette <- colorRampPalette(c("darkred", "darkgreen", "darkblue"))(n = 299)
+heatmap.2(snps, col = my_palette, trace = "none", margins = c(7, 4.5))
+```
+
+In the plot above, we can see some similarities between the PDX samples. So, we will need to examine this issue with more detail.
+
+### 2.1.1 Correlation between samples
+
+
+```{r}
+snps <- getSnpBeta(rgSet)
+corrmatrix <- cor(snps)
+same <- caret::findCorrelation(corrmatrix, 0.9)
+same_ind <- targets$genealogy..LMX..Xenograft.from.liver.mets.[same]
+
+# corrplot
+```
+
+
+## 2.2 Detection P-value
+
+Another QC check is to calculate the detection p-values for every CpG in every sample. This measure indicates the quality of the signal. Small p-values are indicative of reliable signal, whereas large p-values indicate poor quality signal. 
+
+```{r}
+detP <- detectionP(rgSet)
+```
+
+We can examine the mean detection p-value across all samples to identify any failed samples and the proportion of failed probes per samples.
+
+```{r}
+mean_detP <- colMeans(detP)
+names(mean_detP) <- targets$genealogy..LMX..Xenograft.from.liver.mets.me
+```
+
+
+```{r}
+# Also examine the proportion of failed probes (detP >= probe_detP_max).
+failed_proportion <- apply(detP, 2, function(x) {
+  # All probes detP == 0 means totally failed array.
+  if (sum(x) == 0) {
+    return(NA)
+  } else {
+    failed_probes <- sum(x >= probe_detP_max)
+    return(failed_probes / length(x))
+  }
+})
+names(failed_proportion) <- targets$genealogy..LMX..Xenograft.from.liver.mets.me
+```
+
+```{r}
+pal <- brewer.pal(8,"Dark2")
+barplot(mean_detP, col=pal[factor(targets[, class_label])],
+        ylim = c(0, 0.08),
+        las=2,
+        cex.names=0.6, ylab="Mean detection p-values")
+abline(h=0.05,col="red")
+abline(h= 0.01, col = "blue")
+title("(a)", adj=1)
+barplot(failed_proportion, col=pal[factor(targets[, class_label])], 
+        ylim = c(0, 0.12),
+        las=2, 
+        cex.names=0.6, ylab="Proportion of failed probes")
+abline(h=0.1,col="red")
+abline(h=0.05,col="blue")
+abline(h= 0.01, col = "green")
+title("(b)", adj=1)
+#legend("topleft", legend=levels(factor(targets[, class_label])), fill=pal,
+#       bg="white")
+```
+
+As you can see in the plots above, the data has good quality. All the samples have a mean detection p-value below the threshold, as well as, the proportion of failed probes.
+
+### Other visualizations
+
+```{r}
+betas <- getBeta(rgSet)
+dim(betas)
+```
+
+We can also inspect the samples with other plots, such as, beta-distribution or violin plots.
+
+```{r}
+# Beta distribution
+densityPlot(rgSet, 
+            sampGroups = factor(targets[, class_label]), 
+            legend=F)
+
+```
+
+
+
+We can producte QC report, which includes violin plot and the control types.
+
+```{r}
+ # qcReport(rgSet, 
+ #           sampNames = targets$genealogy..LMX..Xenograft.from.liver.mets.me, 
+ #           sampGroups = factor(targets[, class_label]), 
+ #           pdf = file.path(RESULTS_DIR, "qcReport.pdf"))
+```
+
+
+All the samples have good quality. So, we don't need to remove any sample. However, the following code illustrates how to remove samples based on mean detection pval and failed probes.
+
+### Remove samples based on mean detection p-value
+
+```{r}
+### Remove poor quality samples based on mean detection pval.
+keep <- colMeans(detP) < sample_mean_detP_max
+table(keep)
+rgSet <- rgSet[,keep]
+targets <- targets[keep,]
+detP <- detP[,keep]
+```
+
+### Remove samples based on failed probes
+```{r}
+keep <- apply(detP, 2, function(x) {
+  # All probes detP == 0 means totally failed array.
+  if (sum(x) == 0) {
+    return(FALSE)
+  } else {
+    failed_probes <- sum(x >= probe_detP_max)
+    failed_sample_prop <- failed_probes / length(x)
+    return(ifelse(failed_sample_prop < max_failed_probes, TRUE, FALSE))
+  }
+})
+
+rgSet <- rgSet[,keep]
+targets <- targets[keep,]
+detP <- detP[,keep]
+```
+
+
+# 3. Normalization
+To minimise the unwanted variation within and between samples, various data normalisations can be applied. There exists different methods of normalization. In this study, we choose single-sample Noob (ssNoob) method. It has been shown that is the best performing method as it reduces technical variation and improves classification across array types.
+
+Here, there are some recommendations from the experts:
+- **Quantile**: use it when you do not expect global methylation differences between samples, for instance: when all samples are from the same tissue.
+- **Funnorm**: use it when you expect global methylation differences between samples, for instance: tumor/normal or different tissues.
+-**Illumina**: use it when you want to reproduce GenomeStudio results.
+- **Noob**: use it to allow further sample adding. It is also a good default normalization method.
+
+```{r}
+if (norm_method == "Quantile"){
+  mSetSq <- preprocessQuantile(rgSet)
+} else if (norm_method == "Funnorm") {
+  mSetSq <- preprocessFunnorm(rgSet)
+} else if (norm_method == "Noob") {
+  mSetSq <- preprocessNoob(rgSet, dyeMethod = "single")
+  # Convert to RatioSet object.
+  mSetSq <- ratioConvert(mSetSq)
+  # Convert to GenomicRatioSet object.
+  mSetSq <- mapToGenome(mSetSq)
+} else if (norm_method == "Illumina") {
+  mSetSq <- preprocessIllumina(rgSet, bg.correct = TRUE, normalize = "controls",
+                               reference = 1)
+  # Convert to RatioSet object.
+  mSetSq <- ratioConvert(mSetSq)
+  # Convert to GenomicRatioSet object.
+  mSetSq <- mapToGenome(mSetSq)
+} else {
+  stop("[ERROR] normalization method not correctly specified.")
+}
+```
+Obtain beta and M values:
+```{r}
+betas_norm <- getBeta(mSetSq)
+mVal_norm <- getBeta(mSetSq)
+```
+
+# Beta-value distribution
+```{r}
+densityPlot(rgSet, 
+            sampGroups = factor(targets[, class_label]), 
+            main = "Raw B-values", 
+            legend=FALSE)
+legend("top", 
+       legend = levels(factor(targets[, class_label])), 
+       text.col = brewer.pal(8,"Dark2"))
+densityPlot(betas_norm, 
+            sampGroups = factor(targets[, class_label]),
+            main="Normalized B-values", 
+            legend=FALSE)
+legend("top", 
+       legend = levels(factor(targets[, class_label])), 
+       text.col = brewer.pal(8,"Dark2"))
+```
+
+
+## 3.1 Check gender
+
+```{r}
+GMS <- mapToGenome(mSetSq)
+PRED_SEX <- getSex(GMS)
+rownames(PRED_SEX) <- targets$genealogy..LMX..Xenograft.from.liver.mets.me
+# save new variable
+predictedSex<-PRED_SEX$predictedSex
+
+# Reocde
+predictedSex<-gsub("M","Male",predictedSex)
+predictedSex<-gsub("F","Female",predictedSex)
+
+predicted_sex <- predictedSex
+reported_sex <- targets$Gender
+
+# find inconsistencies
+inconsistent <- predicted_sex != reported_sex
+if (sum(na.omit(inconsistent)) == 0) {
+  print("No gender inconsistencies were found.")
+} else {
+  print("Gender inconsistency for samples:")
+  print(targets$genealogy..LMX..Xenograft.from.liver.mets.me[inconsistent])
+}
+# Save sex prediction results as a data.frame.
+df_inconsistencies <- data.frame(list(
+  Sample_Name = targets$genealogy..LMX..Xenograft.from.liver.mets.me,
+  xMed = PRED_SEX$xMed,
+  yMed = PRED_SEX$yMed,
+  Reported_gender = reported_sex,
+  Predicted_gender = predicted_sex,
+  Inconsistency_found = inconsistent
+))
+```
+
+```{r}
+# Plot Reported.
+rep <- ggplot(data = df_inconsistencies, 
+  aes(x=xMed, y=yMed, label=genealogy..LMX..Xenograft.from.liver.mets.me, color=Reported_gender)) +
+  geom_text( size=3, show.legend = F ) + 
+  xlab("Y chr; median total intensity (log2)") +
+  ylab("X chr; median total intensity (log2)") + 
+  ggtitle("Gender Reported") + theme_bw() + 
+  scale_color_manual(values=c("#ff66ff", "#1ab2ff")) +
+  theme(panel.grid.major =element_blank(), 
+  panel.grid.minor = element_blank(), legend.position = "bottom")
+# Plot Predicted.
+pred <- ggplot(data = df_inconsistencies,
+  aes(x=xMed, y=yMed, label=genealogy..LMX..Xenograft.from.liver.mets.me, color=Predicted_gender)) +
+  geom_text(show.legend = FALSE, size=3) + 
+  xlab("Y chr; median total intensity (log2)") + 
+  ylab("X chr; median total intensity (log2)") + 
+  ggtitle("Gender Predicted") + theme_bw() +
+  scale_color_manual(values=c("#ff66ff", "#1ab2ff")) +
+  theme(panel.grid.major =element_blank(), 
+  panel.grid.minor = element_blank())
+
+require(ggpubr)
+ggarrange(rep, pred, ncol = 2, nrow = 1 )      
+```
+
+# 4. Filtering
+
+Once the data has been normalized, it is recommended to filter some probes. 
+
+```{r}
+bVals_original <- getBeta(mSetSq)
+mVals_original <- getM(mSetSq)
+dim(bVals_original)
+```
+
+## 4.1 Remove the failed CpG in all the samples
+Remove probes that have failed in one or more samples. 
+
+```{r}
+detP <- detP[match(rownames(bVals_original),rownames(detP)),]
+if (remove_or_NA_probes == "NA") {
+  # Mark all probes that have failed (detection pval > threshold) as NAs.
+  failed_cpgs <- which(detP > probe_detP_max, arr.ind = TRUE)
+  bVals <- bVals_original
+  bVals[failed_cpgs] <- NA
+  mVals <- mVals_original
+  mVals[failed_cpgs] <- NA
+  print(paste("NAs before mark failed probes:",
+              sum(is.na(bVals_original))))
+  print(paste("NAs after marking failed probes:",
+              sum(is.na(bVals))))
+} else if (remove_or_NA_probes == "remove") {
+  # Remove any probes that have failed (detection pval < threshold) in one or 
+  # more samples
+  keep <- rowSums(detP < probe_detP_max) == dim(bVals_original)[2]
+  print(paste("Probes to keep:", sum(keep)))
+  
+  bVals <- bVals_original[keep, ]
+  mVals <- mVals_original[keep, ]
+    print("Probes before removing failed CpGs.")
+    print(dim(bVals_original)[1])
+    print("Probes after removing failed CpGs.")
+    print(dim(bVals)[1])
+  
+} else {
+  stop("[ERROR] remove_or_NA_probes var should be set to either NA or remove")
+}
+```
+## 4.2 Remove sex chromosomes
+Remove probes that are present in X and Y chromosomes.
+```{r}
+keep <- !(rownames(bVals) %in% annot$Name[annot$chr %in% c("chrX","chrY")])
+bVals <- bVals[keep, ]
+mVals <- mVals[keep, ]
+dim(bVals)
+```
+## 4.3 Remove probes with SNPs at CpG site and at a single nucleotide extension.
+Remove probes that have common SNPs
+```{r}
+snp_info <- getSnpInfo(mSetSq)
+  # Subset for the ones still present.
+snp_info <- snp_info[rownames(bVals), ]
+bVals <- dropLociWithSnps_custom(bVals, snpAnno = snp_info, 
+                                   snps = c("CpG", "SBE"), maf = 0)
+mVals <- dropLociWithSnps_custom(mVals, snpAnno = snp_info, 
+                                   snps = c("CpG", "SBE"), maf = 0)
+table(keep)
+dim(bVals)
+```
+## 4.4 Remove cross reactive probes 
+Remove probes that are cross reactive.
+```{r}
+xReactiveProbes <- read.csv(probes_to_exclude, stringsAsFactors=FALSE)
+keep <- !(rownames(bVals) %in% xReactiveProbes[, 1])
+bVals <- bVals[keep, ]
+mVals <- mVals[keep, ]
+table(keep)
+dim(bVals)
+```
+
+## Data Exploration
+#### Density plot
+
+```{r}
+par(mfrow=c(1,2))
+densityPlot(bVals, 
+            sampGroups = factor(targets[, class_label]), 
+            main = "Beta values", 
+            legend = FALSE, 
+            xlab="Beta values")
+legend("top", 
+       legend = levels(factor(targets[, class_label])), 
+       text.col = brewer.pal(8,"Dark2"), cex=0.6)
+densityPlot(mVals, 
+            sampGroups = factor(targets[, class_label]), 
+            main = "M-values", 
+            legend = FALSE, 
+            xlab = "M values")
+legend("topleft", 
+       legend = levels(factor(targets[, class_label])), 
+       text.col = brewer.pal(8,"Dark2"), cex = 0.6)
+```
+
+
+#### MDS plot
+```{r}
+plotMDS(bVals_original, top=1000, gene.selection="common", pch=19,
+        col=pal[factor(targets[, class_label])])
+legend("topright", legend=levels(factor(targets[, class_label])), text.col=pal,fill=pal,
+       bg="white", cex=0.7)
+title("Normalized b-values")
+plotMDS(bVals, top=1000, gene.selection="common", pc=19,
+        col=pal[factor(targets[, class_label])])
+legend("topright", legend=levels(factor(targets[, class_label])), text.col=pal, fill=pal,
+       cex=0.7, bg="white")
+title("Filtered b-values")
+```
+
+
+
+Optionally, we can save the mVals and bVals for the downstream analysis. 
+```{r}
+# Modify names
+# Put correct sample names.
+colnames(mVals_original) <- targets$genealogy..LMX..Xenograft.from.liver.mets.me
+colnames(bVals_original) <- targets$genealogy..LMX..Xenograft.from.liver.mets.me
+colnames(mVals) <- targets$genealogy..LMX..Xenograft.from.liver.mets.me
+colnames(bVals) <- targets$genealogy..LMX..Xenograft.from.liver.mets.me
+dim(bVals)
+dim(mVals)
+# Write b-vals and m-vals.
+# write.csv(bVals, file = file.path(RESULTS_DIR, "b_values.csv"))
+# write.csv(mVals, file = file.path(RESULTS_DIR, "m_values.csv"))
+#save(bVals, mVals, file = file.path(RESULTS_DIR, "meth.RData"))
+```
+

@@ -1,0 +1,471 @@
+---
+title: "Differential Methylation Analysis"
+author: "Aina Montalban"
+date: "5/14/2020"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packages
+
+```{r message=FALSE, warning=FALSE}
+library(limma)
+library(minfi)
+library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+library(IlluminaHumanMethylationEPICmanifest)
+library(RColorBrewer)
+library(Rtsne)
+library(missMethyl)
+library(matrixStats)
+library(Gviz)
+library(stringr)
+library(gplots)
+require(ggpubr)
+library(ggplot2)
+require(dplyr)
+
+```
+
+
+## Set directories
+
+```{r}
+stem_path <- "/mnt/ElRaid/amontalban/PROJECTS/2020_AMONTALBAN_PDX_Livio" 
+
+IDAT_DIR <- file.path(stem_path, "tmp")
+
+RESULTS_DIR <- file.path(
+  stem_path, 
+  "aina/results")
+
+DATA_DIR <- file.path(
+  stem_path, 
+  "data")
+```
+
+```{r}
+annot <- getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19) # cg annotation from Illumina EPic Microarray
+
+class_label <- "Sample_Group" # variable of intereset
+
+contr <- c("NonResponder-Responder") # contrast to perform / could be also Responder-NonResponder
+```
+
+
+### Load samplesheet
+```{r}
+targets <- read.csv(file.path(DATA_DIR, "sample_sheet_PDX.csv"), skip = 7)
+dim(targets)
+rownames(targets) <- targets$genealogy..LMX..Xenograft.from.liver.mets.
+dim(targets)
+
+
+# Remove duplicates
+# snps <- getSnpBeta(rgSet)
+# corrmatrix <- cor(snps)
+# same <- caret::findCorrelation(corrmatrix, 0.9)
+# length(same)
+# same_ind <- targets$genealogy..LMX..Xenograft.from.liver.mets.[same]
+
+same_ind <- c(  "CRC0356LMX", "CRC0307LMX" ,"CRC0161LMX", "CRC0358LMX", "CRC0262LMX", "CRC0477LMX", "CRC0081LMX", "CRC0029LMX", "CRC0080LMX", "CRC0144LMX", "CRC0306LMX") # Duplicate variables discovered from the QC performed previously, as they high correlation in SNPs.
+```
+
+## Load b-values and m-values
+
+```{r}
+setwd(RESULTS_DIR)
+load("meth.RData")
+```
+
+```{r}
+dim(bVals)
+dim(mVals)
+```
+
+
+```{r}
+targets <- targets[!(targets$genealogy..LMX..Xenograft.from.liver.mets. %in% same_ind), ] # select unique patients
+dim(targets)
+mVals <- mVals[, targets$genealogy..LMX..Xenograft.from.liver.mets.] # select Mvals from unique patients
+dim(mVals)
+bVals <- bVals[, targets$genealogy..LMX..Xenograft.from.liver.mets.] # select bVals from unique patients
+dim(bVals)
+```
+
+
+# Differential Methylation Analysis
+
+```{r}
+my_factor <- factor(targets[["Sample_Group"]])
+design <- model.matrix(~0+my_factor, data=targets)
+colnames(design) <- levels(my_factor)
+
+# fit the linear model 
+fit <- lmFit(mVals, design = design)
+# create a contrast matrix for specific comparisons
+contMatrix <- makeContrasts(contrasts = contr, levels = design)
+# fit the contrasts
+fit2 <- contrasts.fit(fit, contMatrix)
+fit2 <- eBayes(fit2)
+# look at the numbers of DM CpGs at FDR < 0.05
+print(summary(decideTests(fit2)))
+```
+
+
+```{r}
+annSub <- annot[match(rownames(bVals),annot$Name), c(1:4,19, 22:24)]
+DMPs_1 <- topTable(fit2, num=Inf, coef=1, genelist=annSub)
+
+print(head(DMPs_1))
+```
+
+
+```{r}
+sig_DMPs <- subset(as.data.frame(DMPs_1),  (adj.P.Val <= 0.05))
+dim(sig_DMPs)
+diffMeth <- mclapply(as.data.frame(t(bVals[sig_DMPs$Name,])), function(x){
+  cpg_data <- data.frame(x, my_factor)
+  print(head(cpg_data))
+  groupR <- cpg_data$x[cpg_data$my_factor == "Responder"]
+  groupNR <- cpg_data$x[cpg_data$my_factor == "NonResponder"]
+  diff_value <- abs(mean(groupNR)- mean(groupR))
+  return(diff_value)
+}, mc.cores = 4)
+
+
+# groupR <- mclapply(as.data.frame(t(bVals[sig_DMPs$Name,])), function(x){
+#   cpg_data <- data.frame(x, my_factor)
+#   print(head(cpg_data))
+#   groupR <- cpg_data$x[cpg_data$my_factor == "Responder"]
+#   meanR <- mean(groupR)
+#   return(meanR)
+# }, mc.cores = 4)
+# 
+# 
+# groupNR <- mclapply(as.data.frame(t(bVals[sig_DMPs$Name,])), function(x){
+#   cpg_data <- data.frame(x, my_factor)
+#   print(head(cpg_data))
+#   grouNR <- cpg_data$x[cpg_data$my_factor == "NonResponder"]
+#   meanNR <- mean(groupNR)
+#   return(meanNR)
+# }, mc.cores = 4)
+
+cpg_diff_meth <- names(diffMeth[diffMeth >= 0.2])
+#save(diffMeth, file = file.path(RESULTS_DIR, "diffMeth.RData"))
+sig_DMPs$Diff_Meth <- unlist(unname(diffMeth))
+# sig_DMPs$Mean_R <- unlist(unname(groupR))
+# sig_DMPs$Mean_NR <- sig_DMPs$Mean_R - sig_DMPs$Diff_Meth
+
+
+```
+
+
+```{r}
+diff_DMPs <- sig_DMPs[sig_DMPs$Diff_Meth >= 0.2,]
+dim(diff_DMPs)
+colnames(diff_DMPs)
+diff_DMPs$UCSC_RefGene_Name <- gsub("\\;.*", "", diff_DMPs$UCSC_RefGene_Name) # select the first gene to plot name
+
+knitr::kable(head(diff_DMPs[,c(4, 5, 7, 8, 12, 14)], 10))
+```
+
+
+## Volcano plot
+
+```{r}
+hyper <- subset(as.data.frame(diff_DMPs), (adj.P.Val <= 0.05 & logFC >= 2))
+hyper <- hyper[order(hyper$adj.P.Val), ]
+hypo <- subset(as.data.frame(diff_DMPs), (adj.P.Val <= 0.05 & logFC <= -2))
+hypo <- hypo[order(hypo$adj.P.Val),]
+
+label <- subset(as.data.frame(diff_DMPs),  (adj.P.Val <= 0.05))
+label_up   <- subset(label, adj.P.Val <= 0.05 & logFC >=  2 )
+label_up   <- label_up[order(label_up$adj.P.Val, decreasing=FALSE),]
+label_down   <- subset(label, adj.P.Val <= 0.05 & logFC <=  -2 )
+label_down   <- label_down[order(label_down$adj.P.Val, decreasing=FALSE),]
+
+# Volcano plot
+require(ggrepel)
+
+pdf(file.path(RESULTS_DIR, "volcanoPlot-DNAm.pdf"))
+ggplot(data = as.data.frame(DMPs_1), aes(x=logFC, y=-log10(adj.P.Val))) + 
+  geom_point(col="grey") + 
+  geom_point(data=subset(as.data.frame(diff_DMPs), 
+                         (adj.P.Val <= 0.05 & logFC >=  2)), 
+             size=1,  col="red") +
+  geom_point(data=subset(as.data.frame(diff_DMPs),
+                         (adj.P.Val <= 0.05 & logFC <=  -2)), size=1,  col="darkgreen") +
+  geom_hline(yintercept = -log10(0.05), linetype="dashed") +
+  geom_vline(xintercept = c(-2, 2), linetype="dashed") +
+  theme_classic() + geom_label_repel(data=as.data.frame(label_up[1:20,]),
+                                     aes( x=logFC, y=-log10(adj.P.Val), label=gsub("\\;.*", "", UCSC_RefGene_Name)),
+                                     colour='black', point.padding = unit(0.25, "lines"),  
+                                     size=3, segment.size = 0.2, segment.color = 'black',
+                                     nudge_x = 0, nudge_y=0) +
+  geom_label_repel(data=as.data.frame(label_down[1:20,]),
+                   aes( x=logFC, y=-log10(adj.P.Val), label=gsub("\\;.*", "", UCSC_RefGene_Name)),
+                   colour='black', point.padding = unit(0.25, "lines"),  
+                   size=3, segment.size = 0.2, segment.color = 'black', 
+                   nudge_x = 0, nudge_y=0)
+dev.off()
+```
+
+## Manhattan plot
+
+```{r}
+# Manhattan plot
+## Prepare data for the manhattan plt
+nCHR <- length(unique((sig_DMPs$chr)))
+chr_NUM <- as.numeric(substr(sig_DMPs$chr, 4, 5))
+sig_DMPs$chr <- chr_NUM
+
+sig_DMPs$BPcum <- NA
+s <- 0
+nbp <- c()
+
+for (i in sort(unique(sig_DMPs$chr))){
+  nbp[i] <- max(sig_DMPs[sig_DMPs$chr == i,]$pos)
+  # print(sig_DMPs[sig_DMPs$chr == i,"pos"])
+  sig_DMPs[sig_DMPs$chr == i,"BPcum"] <- sig_DMPs[sig_DMPs$chr == i,"pos"] + s
+  s <- s + nbp[i]
+}
+
+sig <- 0.05/nrow(sig_DMPs)
+axisdf <- sig_DMPs %>%
+  group_by(chr) %>%
+  summarize(center=(max(BPcum) + min(BPcum))/2)
+
+manhattanPlot <- ggplot(sig_DMPs, aes(x = BPcum, y = -log10(P.Value))) + 
+  geom_point(aes(colour = as.factor(chr)))
+
+manhattanPlot <- manhattanPlot + labs(x = "Chromosome", y = "-log10(P)") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+manhattanPlot <- manhattanPlot + scale_x_continuous(breaks = axisdf$center, 
+                                                    label = axisdf$chr) 
+
+manhattanPlot <- manhattanPlot + geom_hline(aes(yintercept=-log10(sig)), linetype="dashed")
+
+manhattanPlot <- manhattanPlot + theme(panel.background = element_blank(), 
+                                       legend.position = "none")
+
+mypalette <- c("#E2709A", "#CB4577", "#BD215B", "#970F42", "#75002B") 
+# mypalette_2 <- c("#98e698", "#84e184", "#46d246", "#2db92d", "#1e7b1e") 
+# my_palette_3 <- c("#e60073", "#99004d")
+# mypalette_4 <- c( "#970F42", "#75002B") 
+
+
+
+manhattanPlot <- manhattanPlot +
+  scale_color_manual(values = rep(mypalette, length(unique(sig_DMPs$chr))))
+manhattanPlot <- manhattanPlot +
+  geom_label_repel(data=head(sig_DMPs[sig_DMPs$P.Value<sig,],20), aes(label=as.factor(gsub("\\;.*", "", UCSC_RefGene_Name))), size=3, force=1.3)
+png(file.path(RESULTS_DIR, "manhattanPlot.png"))
+manhattanPlot
+dev.off()
+```
+
+
+
+
+```{r}
+diff_DMPs$UCSC_RefGene_Group <- as.factor(gsub("\\;.*", "", diff_DMPs$UCSC_RefGene_Group))
+diff_DMPs$level <- rep(NA, nrow(diff_DMPs))
+diff_DMPs$position <- rep(NA, nrow(diff_DMPs))
+
+diff_DMPs$level[diff_DMPs$logFC > 0] <- "hypermethylated"
+diff_DMPs$level[diff_DMPs$logFC < 0] <- "hypomethylated"
+
+# In case we only want to select the DMP located in promoters
+promoters <- c("5'UTR", "1stExon", "TSS200", "TSS1500")
+
+
+diff_DMPs$position[grep(paste(promoters,collapse="|"), 
+               diff_DMPs$UCSC_RefGene_Group)] <- "promoter"
+diff_DMPs$position[grep("ExonBnd", 
+               diff_DMPs$UCSC_RefGene_Group)] <- "ExonBnd"
+diff_DMPs$position[grep("Body", 
+               diff_DMPs$UCSC_RefGene_Group)] <- "Body"
+diff_DMPs$position[grep("3'UTR", 
+               diff_DMPs$UCSC_RefGene_Group)] <- "3'UTR"
+
+diff_DMPs$position[diff_DMPs$UCSC_RefGene_Group == ""] <- "Intergenic"
+
+pdf(file = file.path(RESULTS_DIR, "distribution_CpG_1.pdf"))
+ggplot(diff_DMPs, aes(x=UCSC_RefGene_Group, fill=level) ) + geom_bar() + theme_bw() +
+  labs(x="") + scale_fill_manual(values = c("#60a4d1", "#9dd45f"), name="") +
+  theme(axis.text.x = element_text(angle = 45)) + 
+  scale_x_discrete(labels=c("Intergenic", "1stExon", "3'UTR", "5'UTR", "Body", "ExonBnd", "TSS1500", "TSS200" ))+ theme_classic()
+dev.off()
+
+pdf(file = file.path(RESULTS_DIR, "distribution_CpG_2.pdf"))
+ggplot(diff_DMPs, aes(x=Relation_to_Island, fill=level) ) + geom_bar() + theme_bw() +
+  scale_y_continuous(expand = c(0,0)) + labs(x="") + scale_fill_manual(values = c("#60a4d1", "#9dd45f"), name="") +
+    theme(axis.text.x = element_text(angle = 90)) + theme_classic()
+dev.off()
+
+pdf(file = file.path(RESULTS_DIR, "distribution_CpG_3.pdf"))
+ggplot(diff_DMPs, aes(x=position, fill=level) ) + geom_bar() + theme_bw() +
+  labs(x="", y="") + scale_fill_manual(values = c("#60a4d1", "#9dd45f"), name="") + 
+  theme(axis.text.x = element_text(angle = 0)) + scale_y_continuous(expand = c(0,0)) + theme_classic()
+   #geom_text(stat='count', position = position_dodge(width = 1),  size=2.8, 
+    #        aes(label=paste(round(..count../tapply(..count.., ..x.., sum)[..x..], 4)*100, "%", sep="")))
+dev.off()
+
+
+pdf(file = file.path(RESULTS_DIR, "distribution_CpG_4.pdf"))
+ggplot(diff_DMPs, aes(x=Relation_to_Island, fill=level) ) + geom_bar() + theme_bw() +
+  scale_y_continuous(expand = c(0,0)) + labs(x="") + scale_fill_manual(values = c("#60a4d1", "#9dd45f"), name="") +
+    theme(axis.text.x = element_text(angle = 90)) 
+dev.off()
+
+# % Distribution
+table(diff_DMPs$position)*100)/length(diff_DMPs$position
+table(diff_DMPs$Relation_to_Island)*100)/length(diff_DMPs$Relation_to_Island
+
+```
+
+## Gene Enrichment Analysis
+```{r}
+library(enrichR)
+sig_DMPs_hyper <- sig_DMPs[sig_DMPs$logFC < 0,]
+results_enrichr <- enrichr(gsub("\\;.*", "", sig_DMPs_hyper$UCSC_RefGene_Name), databases = c("GO_Biological_Process_2018", "GO_Cellular_Component_2018", "GO_Molecular_Function_2018"))
+table_bp <- results_enrichr$GO_Biological_Process_2018
+table_cc <- results_enrichr$GO_Cellular_Component_2018
+table_mf <- results_enrichr$GO_Molecular_Function_2018
+```
+
+```{r}
+head(table_bp)
+head(table_cc)
+head(table_mf)
+
+write.csv(table_bp, file = file.path(RESULTS_DIR, "GO_Biological_Process_hypo.csv"))
+write.csv(table_cc, file = file.path(RESULTS_DIR, "GO_Cellular_Component_hypo.csv"))
+write.csv(table_mf, file = file.path(RESULTS_DIR, "GO_Molecular_Function_hypo.csv"))
+
+```
+
+## Heatmaps
+```{r}
+pal <- RColorBrewer::brewer.pal(n = 8, name = "Set2")
+pdf(file=file.path(RESULTS_DIR, "heatmap_1000CpGs.pdf"))
+heatmap.2(bVals[sig_DMPs$Name[1:1000],targets$genealogy..LMX..Xenograft.from.liver.mets. ], col = greenred(75), trace = "none", 
+          labRow = FALSE, ColSideColors = pal[factor(targets$Sample_Group)])
+dev.off()
+
+pdf(file=file.path(RESULTS_DIR, "heatmap_diffCpGs.pdf"))
+heatmap.2(bVals[diff_DMPs$Name, ], col = greenred(75), trace = "none", 
+          labRow = FALSE, ColSideColors = pal[factor(targets$Sample_Group)])
+dev.off()
+```
+
+
+## Differentially Methylated Regions
+
+```{r}
+myAnnotation <- DMRcate::cpg.annotate(object = mVals, datatype = "array", what = "M", 
+                                      analysis.type = "differential", design = design, 
+                                      contrasts = TRUE, cont.matrix = contMatrix, 
+                                      coef = "NonResponder-Responder", arraytype = "EPIC", fdr = 0.05)
+
+str(myAnnotation)
+
+DMRs <- DMRcate::dmrcate(myAnnotation, lambda=1000, C=2)
+
+print(DMRs)
+
+# convert the regions to annotated genomic ranges
+results.ranges.DMR <- DMRcate::extractRanges(DMRs, genome = "hg19")
+str(results.ranges.DMR)
+
+write.csv(results.ranges.DMR, file = file.path(
+  RESULTS_DIR,
+  paste0("DMRs_results_", contr[1],".csv")
+  )
+)
+
+pal <- brewer.pal(8,"Dark2")
+
+# PLOT
+# set up the grouping variables and colours
+groups <- pal[1:length(unique(targets$Sample_Group))]
+names(groups) <- levels(factor(targets$Sample_Group))
+cols <- groups[as.character(factor(targets$Sample_Group))]
+samps <- 1:nrow(targets)
+
+# draw the plot for the top DMR
+DMRcate::DMR.plot(ranges=results.ranges.DMR, dmr=528, CpGs=bVals, phen.col=cols, 
+         what = "Beta", arraytype = "EPIC", pch=16, toscale=TRUE, 
+         plotmedians=TRUE, genome="hg19", samps=samps)
+```
+
+
+## Plot differentially methylated CpGs
+```{r}
+gen <- "hg19"
+dmrIndex <- 1
+require(gridExtra)
+# 
+plot_regions <- list()
+# # Create a dataset
+# df_results.ranges <- as.data.frame(results.ranges.DMR)
+# dim(df_results.ranges)
+# str(df_results.ranges)
+for (dmrIndex in 1:4){
+chrom <- as.character(seqnames(results.ranges.DMR[dmrIndex]))
+start <- as.numeric(start(results.ranges.DMR[dmrIndex]))
+end <- as.numeric(end(results.ranges.DMR[dmrIndex]))
+minbase <- start - (0.5*(end-start))
+maxbase <- end + (0.5*(end-start))
+  
+iTrack <- IdeogramTrack(genome = gen, chromosome = chrom, name = "")
+gTrack <- GenomeAxisTrack(col="black", cex=1, name="", fontcolor="black")
+rTrack <- UcscTrack(genome=gen, chromosome=chrom, track="NCBI RefSeq", 
+                    from=minbase, to=maxbase, trackType="GeneRegionTrack", 
+                    rstarts="exonStarts", rends="exonEnds", gene="name", 
+                    symbol="name2", transcript="name", strand="strand", 
+                    fill="darkblue",stacking="squish", name="RefSeq", 
+                    showId=TRUE, geneSymbol=TRUE)
+
+
+annSubOrd <- annSub[order(annSub$chr, annSub$pos),]
+colnames(annSubOrd)
+bVals_Ord <- bVals[match(annSubOrd$Name, rownames(bVals)), targets$genealogy..LMX..Xenograft.from.liver.mets.]
+dim(bVals_Ord)
+
+
+# create genomic ranges object from methylation data
+cpgData <- GRanges(seqnames=Rle(annSubOrd$chr),
+                     ranges=IRanges(start=annSubOrd$pos, end=annSubOrd$pos),
+                     strand=Rle(rep("*",nrow(annSubOrd))),
+                     betas=bVals_Ord)
+
+cpgData <- subsetByOverlaps(cpgData, results.ranges.DMR[dmrIndex])
+
+methTrack <- DataTrack(range=cpgData, groups=targets$Sample_Group,genome = gen,
+                       chromosome=chrom, ylim=c(-0.05,1.05), col=pal,
+                       type=c( "a"), name="DNA Meth.\n(beta value)",
+                       background.panel="white", legend=TRUE, cex.title=0.8,
+                       cex.axis=0.8, cex.legend=0.8)
+
+
+# DMR position data track
+dmrTrack <- AnnotationTrack(start=start, end=end, genome=gen, name="DMR", 
+                            chromosome=chrom,fill="darkred")
+tracks <- list(iTrack, gTrack, methTrack, dmrTrack,
+               rTrack)
+sizes <- c(2,2,5,1,3) # set up the relative sizes of the tracks
+pdf(file=file.path(RESULTS_DIR, paste("DMR", dmrIndex, ".pdf", sep="-")))
+plotTracks(tracks, from=minbase, to=maxbase, showTitle=TRUE, add53=TRUE, 
+           add35=TRUE, grid=TRUE, lty.grid=3, sizes = sizes, length(tracks))
+dev.off()
+}
+```
+

@@ -1,0 +1,179 @@
+---
+title: "Exploratory Data Analysis (EDA)"
+author: "Aina Montalban"
+date: "5/13/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packages
+
+```{r message=FALSE, warning=FALSE}
+library(limma)
+library(minfi)
+library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+library(IlluminaHumanMethylationEPICmanifest)
+library(RColorBrewer)
+library(Rtsne)
+library(missMethyl)
+library(matrixStats)
+library(Gviz)
+library(stringr)
+library(gplots)
+require(ggpubr)
+library(ggplot2)
+```
+
+
+## Set directories
+
+```{r}
+stem_path <- "/mnt/ElRaid/amontalban/PROJECTS/2020_AMONTALBAN_PDX_Livio" 
+
+IDAT_DIR <- file.path(stem_path, "tmp")
+
+RESULTS_DIR <- file.path(
+  stem_path, 
+  "aina/results")
+
+DATA_DIR <- file.path(
+  stem_path, 
+  "data")
+
+class_label <- "Sample_Group"
+```
+
+### Load samplesheet
+```{r}
+targets <- read.csv(file.path(DATA_DIR, "sample_sheet_PDX.csv"), skip = 7)
+dim(targets)
+rownames(targets) <- targets$genealogy..LMX..Xenograft.from.liver.mets.
+dim(targets)
+```
+
+
+## Load b-values and m-values
+
+```{r}
+setwd(RESULTS_DIR)
+load("meth.RData") # load b-values and m-values
+```
+
+```{r}
+dim(bVals) # check dimensions of bVals
+dim(mVals) # check dimensions of mVals
+```
+
+## 1. MDS
+### Explore higher dimensions
+### M-values
+```{r fig.height=10, fig.width=12}
+par(mfrow=c(2,2))
+pal <- brewer.pal(8, "Set2")
+plotMDS(mVals, top=1000, gene.selection="common", pch=19,
+          col=pal[factor(targets[, class_label])], dim=c(1,2))
+legend("topright", legend=levels(factor(targets[, "Sample_Group"])), text.col=pal, fill=pal,
+         cex=0.7, bg="white")
+plotMDS(mVals, top=1000, gene.selection="common", pch=19,
+          col=pal[factor(targets[, class_label])], dim=c(1,3))
+legend("topright", legend=levels(factor(targets[, "Sample_Group"])), text.col=pal, fill=pal, 
+         cex=0.7, bg="white")
+plotMDS(mVals, top=1000, gene.selection="common", pch=19,
+          col=pal[factor(targets[, class_label])], dim=c(2,3))
+legend("topright", legend=levels(factor(targets[, "Sample_Group"])), text.col=pal, fill=pal, 
+         cex=0.7, bg="white")
+plotMDS(mVals, top=1000, gene.selection="common", pch=19, 
+          col=pal[factor(targets[, class_label])], dim=c(3,4))
+legend("topright", legend=levels(factor(targets[, "Sample_Group"])), text.col=pal, fill=pal,
+         cex=0.7, bg="white")
+```
+
+# B-values
+```{r fig.height=10, fig.width=12}
+pal <- brewer.pal(8, "Set2")
+par(mfrow=c(2,2))
+plotMDS(bVals, top=1000, gene.selection="common", pch=19,
+          col=pal[factor(targets[, class_label])], dim=c(1,2))
+legend("topright", legend=levels(factor(targets[, "Sample_Group"])), text.col=pal, fill=pal, 
+         cex=0.7, bg="white")
+plotMDS(bVals, top=1000, gene.selection="common", pch=19,
+          col=pal[factor(targets[, class_label])], dim=c(1,3))
+legend("topright", legend=levels(factor(targets[, "Sample_Group"])), text.col=pal, fill=pal,
+         cex=0.7, bg="white")
+plotMDS(bVals, top=1000, gene.selection="common", pch=19,
+          col=pal[factor(targets[, class_label])], dim=c(2,3))
+legend("topright", legend=levels(factor(targets[, "Sample_Group"])), text.col=pal, fill=pal, 
+         cex=0.7, bg="white")
+plotMDS(bVals, top=1000, gene.selection="common", pch=19, 
+          col=pal[factor(targets[, class_label])], dim=c(3,4))
+legend("topright", legend=levels(factor(targets[, "Sample_Group"])), text.col=pal, fill=pal, 
+         cex=0.7, bg="white")
+```
+
+## 2. t-SNE
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+set.seed(1234)
+bVals_tsne_subset <- sample(which(complete.cases(bVals)), 50000)
+tsne <- Rtsne(t(bVals[bVals_tsne_subset, ]), 
+              dims = 2, 
+              perplexity=6, 
+              verbose=TRUE, 
+              max_iter = 5000)
+```
+
+```{r message=FALSE, warning=FALSE}
+plot(tsne$Y, t='p', pch = 19, main="t-SNE", col=pal[factor(targets$Sample_Group)],
+     xlab = "First dimension", ylab = "Second dimension")
+legend("topright", legend=levels(factor(targets$Sample_Group)), 
+       text.col=pal, fill=pal, col = pal, cex=0.7, bg="white")
+```
+
+## 3. PCA
+
+```{r}
+pca_filt <- prcomp(t(na.omit(bVals[sample(1:nrow(bVals), 2000),])))
+percent <- round((((pca_filt$sdev)^2 / sum(pca_filt$sdev^2))*100)[1:2], 3)
+pca1_filt <- pca_filt$x[,1]
+pca2_filt <- pca_filt$x[,2]
+data_filt <- as.data.frame(cbind(pca1_filt, pca2_filt))
+data_filt$Group <- targets$Sample_Group
+data_filt$Gender <- targets$Gender # you should have the variable gender predicted in the samplesheet
+```
+
+```{r}
+p1 <- ggplot(data_filt,aes(x=pca1_filt, y=pca2_filt, color=Group)) +
+  geom_point(size=2.5) +  theme_bw() + 
+  theme(text = element_text(size=15), legend.title = 
+  element_text(colour = "black", size=12, face="bold"),
+  legend.text = element_text(colour = "black", size=10))+ 
+  labs(x= paste("PC1 (", percent[1], "%)", sep = ""), 
+ y=paste("PC2 (", percent[2], "%)", sep = ""), title= "PCA by treatment response")
+```
+
+```{r}
+p3 <- ggplot(data_filt[!is.na(targets$Gender),],aes(x=pca1_filt, y=pca2_filt, color=Gender)) + 
+  geom_point(size=2.5) +  theme_bw()+ 
+  theme(text = element_text(size=15), 
+        legend.title = element_text(colour = "black", size=12, face="bold"),
+        legend.text = element_text(colour = "black", size=10))+ 
+  labs(x= paste("PC1 (", percent[1], "%)", sep = ""), 
+       y=paste("PC2 (", percent[2], "%)", sep = ""), title = "PCA by gender")
+```
+
+
+```{r}
+targets$Gender <- as.factor(targets$Gender)
+g4 <- ggplot(data = targets, 
+       aes(x = Sample_Group, y=..count.., fill=Gender)) + 
+  geom_bar(position = "stack") +
+  theme_classic()+ theme(text = element_text(size=15), 
+  legend.title = element_text(colour = "black", size=12, face="bold"),
+  legend.text = element_text(colour = "black", size=10)) +
+  geom_text(stat = 'count', aes(label=..count..), color="white", 
+  position="stack", vjust=1.4) + labs(x="Group", y="Count") +
+  scale_fill_discrete(name="Gender", labels=c("Male", "Female", "Unknown")) 
+```

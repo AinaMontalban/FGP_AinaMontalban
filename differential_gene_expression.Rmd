@@ -1,0 +1,226 @@
+---
+title: "Differential Gene Expression between RES and NRES"
+author: "Aina Montalban"
+date: "12/05/2020"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+#BiocManager::install("limma")
+#BiocManager::install("GEOquery")
+#install.packages("RColorBrewer")
+#BiocManager::install("illuminaHumanv4.db")
+#BiocManager::install("annotate")
+```
+
+## Load packages
+
+```{r message=FALSE, warning=FALSE}
+library(limma)
+library(GEOquery)
+library(RColorBrewer)
+library(knitr)
+```
+
+# Define directories
+```{r}
+# Directories
+stem_path <- "/mnt/ElRaid/amontalban/PROJECTS/2020_AMONTALBAN_PDX_Livio" 
+
+RESULTS_DIR <- file.path(
+  stem_path, 
+  "results")
+setwd(RESULTS_DIR)
+
+DATA_DIR <- file.path(
+stem_path,
+"data")
+```
+
+
+# Read data from GEO
+
+```{r}
+# Load targets
+#"data")
+targets <- read.csv(file.path(DATA_DIR, "sample_sheet_PDX.csv"), skip = 7)
+dim(targets)
+rownames(targets) <- targets$genealogy..LMX..Xenograft.from.liver.mets.
+dim(targets)
+same_ind <- c( "CRC0356LMX","CRC0307LMX" ,"CRC0161LMX" ,"CRC0358LMX" ,"CRC0262LMX", "CRC0477LMX" ,"CRC0081LMX", "CRC0029LMX", "CRC0080LMX","CRC0144LMX", "CRC0306LMX")
+targets <- targets[targets$Sample_Group != "",]
+rownames(targets) <- targets$genealogy..LMX..Xenograft.from.liver.mets.
+targets <- targets[!rownames(targets) %in% same_ind, ]
+dim(targets)
+
+gst <- getGEO("GSE76402", AnnotGPL = TRUE)
+gset <- gst[[1]]
+ss <- pData(gst[[1]])
+
+
+subset_target <- targets[,c("Sample_Name", "Sample_Group", "cgenalogy")] #retrieve sample name and group from methylation samplesheet
+subset_target$ID <- gsub("LMX","" ,rownames(subset_target)) # remove LMX to match sample names
+ss$ID <- ss$`case_unique_id:ch1` # create column ID in gene expression samplesheet
+ss.merged <- merge(subset_target, ss, by="ID") # merge the two samplesheets by ID variable
+```
+
+
+# Load expression set
+```{r}
+# Expression set
+set <- exprs(gset)
+save(set, file="exprs.RData")
+eset <- log2(exprs(gset))
+eset.merged <- eset[, ss.merged$geo_accession]
+colnames(eset.merged) <- ss.merged$ID
+dim(eset.merged)
+```
+
+# Differential gene expression
+
+```{r}
+# eset_avg <- t(rowsum(t(eset.merged), colnames(eset.merged)) / c(table(colnames(eset.merged))))
+# save(eset_avg, file = "esetAvg.RData")
+# ss.unique <- ss.merged[!duplicated(ss.merged$ID),]
+
+# Variable of interest 
+my_factor <- factor(ss.merged[["Sample_Group"]])
+# Create design matrix
+design <- model.matrix(~0+my_factor, data=ss.merged)
+colnames(design) <- levels(my_factor)
+# Duplicate Correlation to consider patient effect
+corfit <- duplicateCorrelation(eset.merged, block = ss.merged$ID, design = design)
+# Fit the linear model 
+fit <- lmFit(eset.merged,block = ss.merged$ID, cor=corfit$consensus, design = design)
+# Create a contrast matrix 
+contMatrix <- makeContrasts(contrasts = "NonResponder-Responder", levels = design)
+# Fit the contrasts
+fit2 <- contrasts.fit(fit, contMatrix)
+fit2 <- eBayes(fit2)
+
+# look at the numbers of DM CpGs at FDR < 0.05
+print(summary(decideTests(fit2)))
+```
+
+
+## Annotation
+```{r}
+#BiocManager::install("annotate")
+library(illuminaHumanv4.db)
+require(annotate)
+
+probeList <- rownames(eset.merged)
+annot_genes <- as.list(illuminaHumanv4ALIAS2PROBE)
+colnames(annot_genes)
+
+geneSymbol <- getSYMBOL(probeList, 'illuminaHumanv4.db')
+geneName <- sapply(lookUp(probeList, 'illuminaHumanv4.db', 'ENTREZID'), function(x) x[1])
+fit2$genes <- data.frame(ID= probeList, geneSymbol=geneSymbol, geneName=geneName, stringsAsFactors=FALSE)
+
+top_genes <- topTable(fit2, number=nrow(fit2), adjust.method = "fdr", coef=1)
+
+sigGene <- top_genes$geneSymbol[top_genes$adj.P.Val <= 0.05]
+length(sigGene)
+write.csv(na.omit(sigGene), file = file.path(RESULTS_DIR, "sigGenes.txt"), row.names = FALSE, quote = FALSE)
+DEGs <- top_genes[top_genes$adj.P.Val <= 0.05, ]
+dim(DEGs)
+kable(head(DEGs, 10))
+```
+
+
+# Volcano plot
+```{r}
+hyper <- subset(as.data.frame(DEGs), (adj.P.Val <= 0.05 & logFC >= 1))
+hyper <- hyper[order(hyper$adj.P.Val), ]
+hypo <- subset(as.data.frame(DEGs), (adj.P.Val <= 0.05 & logFC <= -1))
+hypo <- hypo[order(hypo$adj.P.Val),]
+
+label <- subset(as.data.frame(DEGs),  (adj.P.Val <= 0.05))
+label_up   <- subset(label, adj.P.Val <= 0.05 & logFC >=  0.5 )
+label_up   <- label_up[order(label_up$adj.P.Val, decreasing=FALSE),]
+label_down   <- subset(label, adj.P.Val <= 0.05 & logFC <=  -0.5 )
+label_down   <- label_down[order(label_down$adj.P.Val, decreasing=FALSE),]
+
+# Volcano plot
+require(ggrepel)
+ggplot(data = as.data.frame(top_genes), aes(x=logFC, y=-log10(adj.P.Val))) + 
+  geom_point(col="grey") + 
+  geom_point(data=subset(as.data.frame(DEGs), 
+                         (adj.P.Val <= 0.05 & logFC >=  0.5)), 
+             size=1,  col="red") +
+  geom_point(data=subset(as.data.frame(DEGs),
+                         (adj.P.Val <= 0.05 & logFC <=  -0.5)), size=1,  col="darkblue") +
+  geom_hline(yintercept = -log10(0.05), linetype="dashed") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype="dashed") +
+  theme_classic() + 
+geom_label_repel(data=as.data.frame(label_up[1:15,]),
+                                     aes( x=logFC, y=-log10(adj.P.Val), label=geneSymbol),
+                                     colour='black', point.padding = unit(0.1, "lines"),
+                                     size=3, segment.size = 0.1, segment.color = 'black',
+                                     nudge_x = 0, nudge_y=0) +
+  geom_label_repel(data=as.data.frame(label_down[1:15,]),
+                   aes( x=logFC, y=-log10(adj.P.Val), label=geneSymbol),
+                   colour='black',
+                                     colour='black', point.padding = unit(0.21, "lines"),
+                                     size=3, segment.size = 0.1, segment.color = 'black',
+                                     nudge_x = 0, nudge_y=0)
+
+```
+
+## Gene enrichment ananlysis
+
+```{r}
+# Go ONTOLOGY
+library(enrichR)
+results_enrichr <- enrichr(sigGene, databases = c("GO_Biological_Process_2018", "GO_Cellular_Component_2018", "GO_Molecular_Function_2018"))
+table_bp <- results_enrichr$GO_Biological_Process_2018
+kable(head(table_bp))
+
+table_cc <- results_enrichr$GO_Cellular_Component_2018
+kable(head(table_cc))
+
+table_mf <- results_enrichr$GO_Molecular_Function_2018
+kable(head(table_mf))
+```
+
+```{r}
+ggplot(head(table_bp,10), aes(y=as.numeric(gsub("\\/.*", "", Overlap)), 
+x=reorder(Term, -Adjusted.P.value), fill=Adjusted.P.value)) + 
+geom_col() + coord_flip() + scale_fill_gradient(low = "#ff6666", high = "#0033cc") + 
+labs(y="Number of genes", x="Terms", title = "Biological Process") + theme_classic() +
+geom_text(aes(label=gsub("\\/.*", "", Overlap)), position="stack", hjust=-0.3) + 
+scale_y_continuous(limits = c(0,300))
+```
+
+
+
+```{r}
+ggplot(head(table_cc,10), aes(y=as.numeric(gsub("\\/.*", "", Overlap)), 
+x=reorder(Term, -Adjusted.P.value), fill=Adjusted.P.value)) + 
+geom_col() + coord_flip() + scale_fill_gradient(low = "#ff6666", high = "#0033cc") + 
+labs(y="Number of genes", x="Terms", title = "Cellular Component") + theme_classic() +
+geom_text(aes(label=gsub("\\/.*", "", Overlap)), position="stack", hjust=-0.3) + 
+scale_y_continuous(limits = c(0,300))
+```
+
+```{r}
+ggplot(head(table_mf,10), aes(y=as.numeric(gsub("\\/.*", "", Overlap)), 
+x=reorder(Term, -Adjusted.P.value), fill=Adjusted.P.value)) + 
+geom_col() + coord_flip() + scale_fill_gradient(low = "#ff6666", high = "#0033cc") + 
+labs(y="Number of genes", x="Terms", title = "Molecular Function") + theme_classic() +
+geom_text(aes(label=gsub("\\/.*", "", Overlap)), position="stack", hjust=-0.3) + 
+scale_y_continuous(limits = c(0,200))
+```
+
+
+```{r}
+write.csv(DEGs, file = file.path(RESULTS_DIR, "DEGs.csv"))
+```
