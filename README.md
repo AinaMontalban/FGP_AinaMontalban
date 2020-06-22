@@ -19,12 +19,12 @@ The following files are included:
 
 - *differential_gene_expression.Rmd*: rmarkdown used to perform the differential expression analysis between the cetuximab-sensitive and resistant
 
-- *Machine_Learning_application_DNA_methylation.R*: predictor using Random Forest and hybrid algorithm
+- *Machine_Learning_application_DNA_methylation.R*: script used to create the machine learning model using a Random Forest algorithm and 3-repeats 10 cross-validation as validation
 
-- *Machine_Learning_application_gene_expression.R*
+- *Machine_Learning_application_gene_expression.R*: script used to create the machine learning model using a Random Forest algorithm and 3-repeats 10 cross-validation as validation
 
-- *feature_selection_methods.R*
+- *feature_selection_methods.R*: script with different selection functions, such as, ANOVA, BORUTA, RFS, among others.
 
-- *unsupervised_clustering.Rmd*
+- *unsupervised_clustering.Rmd*: script to identify subgroups in the data by kmeans and hierarchical clustering
 
 
