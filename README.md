@@ -27,4 +27,5 @@ The following files are included:
 
 - *unsupervised_clustering.Rmd*: script to identify subgroups in the data by kmeans and hierarchical clustering
 
+The other_scripts/ folder contains 4 files to compute the correlation between LMX and LMH, the model selection process, a custom Random Forest to be able to perform hyperparameter tuning and a scripts used to plot GO terms.
 
